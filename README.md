@@ -154,13 +154,3 @@ Do not create one giant commit. Example sequence:
 8. `feat: validate and persist LLM QA generation`
 9. `feat: expose generation staleness at retrieval`
 10. `docs: add setup and end-to-end demo`
-
-## Before submission
-
-- Run against the actual v1/v2 PDFs from `AI Internship Assignment Files – CT-200`.
-- Add tests for each irregularity explicitly listed in the manual/package.
-- Confirm table/figure extraction and parent-child relationships visually.
-- Demonstrate changed and unchanged nodes across real v1/v2 documents.
-- Test malformed LLM responses and missing API key behavior.
-- Include a Postman collection or saved curl script and screenshots/logs from the real run.
-- Push real incremental commits to GitHub; do not claim test results that were not run.
