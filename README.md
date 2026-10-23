@@ -1,84 +1,112 @@
-# Tri9T AI Engineering Internship Assignment — CT-200 QA Traceability API
+# Tri9T AI Engineering Internship Assignment
 
-A FastAPI backend that ingests a CT-200 PDF, reconstructs a hierarchical section tree, stores immutable document versions, pins selections to exact node/version content, generates structured QA test ideas through an OpenAI-compatible LLM endpoint, and reports stale generations after re-ingestion.
+## CT-200 QA Traceability API
 
-> **Source PDFs included:** `data/manuals/ct200_manual_v1.pdf` and `data/manuals/ct200_manual_v2.pdf` are the actual supplied manuals. The parser has been exercised against both and a regression test checks known version differences. The parser preserves the original table text and adds structured table/row/cell nodes for the recognizable General Specifications and Error Codes tables. This is a targeted reconstruction for the supplied manuals, not a claim of universal table extraction.
+A FastAPI service that ingests CT-200 PDF manuals, builds a hierarchical section tree, stores immutable document versions, saves selections against exact source versions, generates structured QA test ideas through an OpenAI-compatible LLM endpoint, and reports when a generation's source has changed in a later manual version.
 
-## Stack and design decisions
+The supplied manuals are included at `data/manuals/ct200_manual_v1.pdf` and `data/manuals/ct200_manual_v2.pdf`. PDF parsing and table reconstruction are tailored to these manuals; this project is not a general-purpose PDF understanding system.
 
-- **FastAPI + Pydantic:** REST API and strict validation of LLM JSON.
-- **SQLAlchemy + SQLite:** documents, immutable versions, nodes, selections, and pinned snapshots.
-- **JSON store for generations:** a justified lightweight local store, with atomic file replacement and a lock. It avoids requiring a MongoDB service for a small internship demo. For multi-process/production use, replace with MongoDB or a transactional database.
-- **PyMuPDF first, OCR fallback:** use PDF text when usable; otherwise try `pdf2image` + Tesseract. OCR dependencies must be installed on the host.
-- **Version matching:** normalized hierarchy path plus sibling occurrence (`heading~1`). Repeated headings under different parents remain distinct. This is deterministic and explainable but can fail if a heading is renamed, moved, or a preceding duplicate is inserted. Such cases may appear removed/new; fuzzy matching is a future enhancement.
-- **Staleness:** compares selected source hashes with the corresponding logical node in the latest version. It deliberately flags any content change, including wording-only edits. It does not determine clinical significance; safety-critical thresholds should receive human review.
-- **Repeated generation:** idempotent by default for a completed selection; `force_new=true` explicitly requests a fresh generation.
-- **Malformed LLM output:** validated with Pydantic, retried with bounded exponential delay, then returns HTTP 502. No unvalidated output is persisted.
+## Repository structure
 
-## Quick start
+| Path | Purpose |
+|---|---|
+| `app/main.py` | FastAPI ingestion, browsing, search, comparison, selection, generation, and retrieval endpoints |
+| `app/parser.py` | PDF text/OCR extraction, hierarchy construction, logical node keys, and targeted table reconstruction |
+| `app/models.py`, `app/db.py` | SQLAlchemy models and SQLite setup |
+| `app/llm.py`, `app/schemas.py` | LLM requests, bounded retries, and Pydantic response validation |
+| `app/store.py` | Local JSON store for generated output |
+| `data/manuals/` | Supplied CT-200 v1 and v2 PDF manuals |
+| `tests/` | Parser, API, LLM, and versioning/staleness test definitions |
+| `scripts/demo_flow.py` | Deterministic synthetic versioning and staleness walkthrough using a stub LLM |
+| `scripts/real_manual_flow.py` | Live API walkthrough using the supplied manuals and configured LLM provider |
+| `approach.md` | Design rationale, parser observations, validation notes, and limitations |
 
-Python 3.11+ recommended.
+## Design overview
 
-```bash
-python -m venv .venv
-# Windows PowerShell:
-.venv\\Scripts\\Activate.ps1
-# macOS/Linux:
-source .venv/bin/activate
+- **API and validation:** FastAPI with Pydantic request and LLM-output validation.
+- **Documents and versions:** SQLAlchemy with SQLite stores documents, immutable versions, parsed nodes, and version-pinned selections.
+- **Generated output:** A local JSON store uses atomic replacement and a lock. This keeps the demo simple; a multi-process or production deployment should use a transactional shared store.
+- **PDF parsing:** PyMuPDF text extraction is attempted first, with OCR fallback when extracted text is insufficient. OCR requires the relevant host tools and Python dependencies.
+- **Logical node identity:** A normalized hierarchy path and sibling occurrence distinguish repeated headings. Renamed or moved headings can appear as removed/new nodes.
+- **Staleness:** Source hashes are compared with the corresponding logical nodes in the latest version. Any content change can mark a generation stale; this does not assess clinical significance or automatically regenerate test cases.
+- **Generation reuse:** A completed generation is reused for the same selection by default. `force_new: true` requests a fresh generation.
+- **Invalid LLM output:** Output is schema-validated, retried a bounded number of times, and not persisted unless validation succeeds.
 
-pip install -r requirements.txt
-copy .env.example .env   # Windows; on macOS/Linux use: cp .env.example .env
+## Requirements
+
+- Python 3.11 or newer
+- An OpenAI-compatible API key for live generation (the default endpoint is Groq)
+- Tesseract OCR and Poppler if OCR fallback is needed
+
+## Setup
+
+### Windows PowerShell
+
+```powershell
+py -3.11 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
+Copy-Item .env.example .env
 ```
 
-Add an OpenAI-compatible API key to `.env` (Groq is the default endpoint) to enable generation. The API can start without a key, but `/generations` will return 502 until configured.
+### macOS or Linux
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+cp .env.example .env
+```
+
+Set `LLM_API_KEY` in `.env` to enable live generation. The API can start without a key, but generation requests will fail until a provider is configured. Keep `.env` private and do not commit it.
+
+Start the API from the repository root:
 
 ```bash
 uvicorn app.main:app --reload
 ```
 
-Open `http://127.0.0.1:8000/docs`.
+Interactive API documentation is available at <http://127.0.0.1:8000/docs>.
 
-## Ingest v1 then v2
+## Ingest the supplied manuals
 
-Place the supplied CT-200 manuals somewhere on your machine. In Swagger (`/docs`) call `POST /documents/ingest` twice:
-1. Upload v1 with query `document_name=CT-200`.
-2. Upload v2 with the same `document_name=CT-200`.
+In Swagger at `/docs`, call `POST /documents/ingest` twice using the same `document_name` value, such as `CT-200`: first upload `data/manuals/ct200_manual_v1.pdf`, then `data/manuals/ct200_manual_v2.pdf`. Re-uploading identical PDF content is idempotent; changed content creates another immutable version.
 
-The same source file hash is not ingested twice. A changed PDF creates version 2 and keeps version 1 rows intact.
-
-Example with curl:
+Example using curl from the repository root:
 
 ```bash
-curl -X POST "http://127.0.0.1:8000/documents/ingest?document_name=CT-200" \\
-  -F "file=@data/ct200_manual_v1.pdf"
-curl -X POST "http://127.0.0.1:8000/documents/ingest?document_name=CT-200" \\
-  -F "file=@data/ct200_manual_v2.pdf"
+curl -X POST "http://127.0.0.1:8000/documents/ingest?document_name=CT-200" \
+  -F "file=@data/manuals/ct200_manual_v1.pdf"
+
+curl -X POST "http://127.0.0.1:8000/documents/ingest?document_name=CT-200" \
+  -F "file=@data/manuals/ct200_manual_v2.pdf"
+
 curl "http://127.0.0.1:8000/documents/1/sections?version=1"
 curl "http://127.0.0.1:8000/documents/1/sections?version=2"
 ```
 
-The exact document ID depends on your local database. Do not assume it is 1 if you have ingested other documents.
+Use the document ID returned by the API in place of `1`; IDs depend on the local database contents.
 
-## Main API
+## API overview
 
 | Method | Endpoint | Purpose |
 |---|---|---|
-| `POST` | `/documents/ingest?document_name=CT-200` | Ingest a PDF as a new version |
-| `GET` | `/documents` | List documents and latest versions |
-| `GET` | `/documents/{id}/sections?version=1` | List top-level sections; defaults to latest |
-| `GET` | `/nodes/{node_id}` | Get node, recursively nested children, aggregate subtree text, and content hash |
-| `GET` | `/search?q=pressure&document_id=1&version=2` | Search headings and body text |
-| `GET` | `/nodes/{node_id}/changes` | Compare matching logical nodes across versions |
-| `POST` | `/selections` | Save named selection pinned to a version |
-| `POST` | `/generations` | Generate 3–5 QA ideas for a selection |
-| `GET` | `/generations?selection_id=1` | Retrieve generated output and staleness |
-| `GET` | `/generations?node_id=1` | Retrieve generations involving a node |
-| `GET` | `/generations/{generation_id}` | Retrieve one generation and staleness |
 | `GET` | `/health` | Health check |
+| `POST` | `/documents/ingest?document_name=CT-200` | Ingest a PDF version |
+| `GET` | `/documents` | List documents and latest versions |
+| `GET` | `/documents/{id}/sections?version=1` | List top-level sections for a version |
+| `GET` | `/nodes/{node_id}` | Return a node, descendants, subtree text, and hash |
+| `GET` | `/search?q=pressure&document_id=1&version=2` | Search headings and body text |
+| `GET` | `/nodes/{node_id}/changes` | Compare a logical node across versions |
+| `POST` | `/selections` | Save a selection pinned to a version |
+| `POST` | `/generations` | Generate validated QA ideas for a selection |
+| `GET` | `/generations?selection_id=1` | Retrieve generations for a selection, including staleness |
+| `GET` | `/generations?node_id=1` | Retrieve generations involving a node |
+| `GET` | `/generations/{generation_id}` | Retrieve one generation and its staleness |
 
-### Selection request
+## Selections and generations
 
-Use node IDs returned for the same version:
+Create a selection using IDs returned for the same document version:
 
 ```json
 {
@@ -89,68 +117,58 @@ Use node IDs returned for the same version:
 }
 ```
 
-The API rejects nodes that do not belong to the selected version. Selecting a section captures that node and all descendants, once each, in tree order; this prevents an empty parent body from omitting the actual section requirements and ensures a changed child can make the generation stale. The selection stores each node's content hash, heading snapshot, and body-text snapshot so its exact source survives later re-ingestion. The response distinguishes `requested_node_ids` from `captured_node_ids`.
+Every requested node must belong to the selected version. Selecting a node captures it and its descendants in tree order. The selection stores source version, content hash, heading, and body-text snapshots, so later ingestion does not alter the selection. The response distinguishes `requested_node_ids` from `captured_node_ids`.
 
-### Generation request
+Request generation with:
 
 ```json
 {"selection_id": 1, "force_new": false}
 ```
 
-The response stores the generation alongside exact source node/version/hash snapshots. By default, repeated requests reuse the last successful generation for that selection. Set `force_new` to `true` to request a fresh output.
+The prompt requests 3–5 structured QA ideas with executable steps, expected results, source references, and risk, without inventing thresholds. Completed output is reused by default for the same selection; set `force_new` to `true` for a new request. IDs in examples are illustrative and should be replaced with API responses.
 
-### Staleness demo flow
+## Versioning and staleness flow
 
-1. Ingest v1 and create a selection from a section.
-2. Generate QA ideas; keep the returned `generation_id`.
-3. Ingest v2 with the same `document_name`.
-4. Call `GET /generations/{generation_id}`.
-5. Inspect `staleness.stale` and `staleness.changed_sources`.
-6. Call `GET /documents/{id}/sections?version=1` to confirm v1 still exists.
-7. Submit the same selection again; it remains pinned to v1 and returns its prior generation unless `force_new=true`.
+1. Ingest v1 and create a selection from one or more returned node IDs.
+2. Generate QA ideas and retain the returned `generation_id`.
+3. Ingest v2 using the same `document_name`.
+4. Retrieve the saved generation with `GET /generations/{generation_id}` and inspect `staleness` and `changed_sources`.
+5. Retrieve v1 sections to confirm the original version remains available.
 
-The current implementation intentionally checks against the **latest** version while retaining the generation's original source snapshots. It does not automatically regenerate stale test cases.
+The selection remains pinned to its original version. Staleness is checked against the latest version; changed generations are not automatically regenerated.
 
-## Parser and hierarchy notes
+## Parser behavior and limitations
 
-The parser uses conservative patterns for numbered headings, short all-caps headings, and common labels such as Appendix, WARNING, CAUTION, NOTE, Table, and Figure. It retains repeated headings as separate nodes and preserves leading text in a `Document preamble` node instead of silently dropping it. Parent-child nesting is inferred from heading depth.
+The parser recognizes numbered headings and selected labels such as warnings, notes, appendices, tables, and figures. It preserves repeated headings under distinct parent paths and keeps text before the first numbered section in a preamble node. Targeted rules create table, row, and cell nodes for recognizable General Specifications and Error Codes tables, while retaining the original table text in the owning section as a fallback.
 
-This is not a generic PDF parser. Table reconstruction currently uses conservative rules for the two recognizable tables in the supplied manuals (specifications and error codes); it retains original flattened text as a fallback. Other layout-sensitive tables, multi-column reading order, captions, unnumbered mixed-case headings, headers/footers, OCR mistakes, and headings split across lines can still be misclassified. The tests include synthetic PDF fixtures and regression checks against both actual CT-200 PDFs, including structured table-node assertions.
+Parsing remains heuristic. Complex or arbitrary tables, multi-column reading order, figure/caption association, split headings, OCR mistakes, headers and footers, and some unnumbered headings may need manual review. OCR fallback currently depends on the document's total extracted text, so a scanned page inside an otherwise text-based PDF may not trigger OCR. A renamed or moved heading may be treated as removed/new, and any text change can mark a source stale.
 
-## Verify the complete versioning/staleness flow
+## Demonstration and tests
 
-Run the deterministic end-to-end demo from the repository root:
+Run the deterministic synthetic workflow:
 
 ```bash
 python scripts/demo_flow.py
 ```
 
-The script creates synthetic v1/v2 PDFs, uses a stubbed LLM response, ingests v1, selects a parent section (including its descendants), creates a generation, ingests v2 with a changed pressure-release requirement, and asserts that retrieval reports the generation as stale. Its output explicitly identifies this as a synthetic workflow demo; real-manual parsing is covered separately by regression tests, and the demo does not test a live LLM provider.
+This walkthrough uses synthetic PDFs and a stub LLM. It demonstrates versioning and staleness behavior, but does not verify live provider access or visually validate every page of the supplied manuals.
 
-## Run tests
+For the live-manual walkthrough, configure `.env`, start the API, and run this from a second terminal at the repository root:
+
+```bash
+python scripts/real_manual_flow.py
+```
+
+This script uses the configured provider and creates demo records in the running API database. Run it only when you intend to use that provider and database.
+
+Run the test suite from the repository root:
 
 ```bash
 pytest -q
 ```
 
-The suite covers synthetic PDF fixtures and regression checks against the actual v1/v2 manuals, hierarchy, duplicate heading identity, normalized hashes, version pinning, repeated-upload idempotency, subtree selection, generation deduplication, changed-node diffs, staleness detection, malformed LLM output retries, missing API key behavior, and invalid PDF rejection.
+The suite contains synthetic fixtures and regression tests for parser behavior, the supplied manuals, API behavior, LLM validation, and versioning/staleness. These are test definitions; report a passing result only after running them successfully in your environment.
 
-## Decision log
+## Git history note
 
-1. **Most likely silent wrong result:** A paragraph or table row can be assigned to the wrong heading while producing a valid tree. Catch it with a page-by-page visual review, section counts, text coverage checks, and fixture tests for every irregular CT-200 page.
-2. **Simplicity over correctness:** Heading-depth heuristics and targeted table rules are used instead of full layout analysis. Complex tables and multi-column pages may fail in production and must be surfaced for manual review.
-3. **Unsupported input:** A heading split across lines or a complex multi-column table may not be reconstructed correctly. The parser preserves extracted text where possible but does not claim structural certainty; record such pages as known limitations and add targeted rules/tests before submission.
-
-## Suggested incremental Git history
-
-Do not create one giant commit. Example sequence:
-1. `chore: scaffold FastAPI project and configuration`
-2. `feat: add SQLAlchemy document and version models`
-3. `feat: parse PDF text into a section hierarchy`
-4. `test: cover duplicate headings and content hashes`
-5. `feat: ingest immutable document versions`
-6. `feat: add browse search and change APIs`
-7. `feat: pin selections to exact version snapshots`
-8. `feat: validate and persist LLM QA generation`
-9. `feat: expose generation staleness at retrieval`
-10. `docs: add setup and end-to-end demo`
+The supplied ZIP is a source snapshot and does not contain the original Git history. Any commits created while preparing a repository should describe changes that were actually made; do not present an illustrative commit sequence as pre-existing history.
